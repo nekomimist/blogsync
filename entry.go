@@ -198,10 +198,12 @@ func entryFromReader(source io.Reader) (*Entry, error) {
 	if f, ok := source.(*os.File); ok {
 		fi, err := os.Stat(f.Name())
 		if err != nil {
-			return nil, err
+			t := time.Now()
+			entry.LastModified = &t
+		} else {
+			t := fi.ModTime()
+			entry.LastModified = &t
 		}
-		t := fi.ModTime()
-		entry.LastModified = &t
 	}
 
 	return entry, nil
