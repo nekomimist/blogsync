@@ -1,36 +1,37 @@
 package main
 
 import (
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
+
+	"gopkg.in/yaml.v2"
 )
 
-type Config struct {
-	Default *BlogConfig
-	Blogs   map[string]*BlogConfig
+type config struct {
+	Default *blogConfig
+	Blogs   map[string]*blogConfig
 }
 
-type BlogConfig struct {
+type blogConfig struct {
 	RemoteRoot string `yaml:"-"`
 	LocalRoot  string `yaml:"local_root"`
 	Username   string
 	Password   string
 }
 
-func LoadConfig(r io.Reader) (*Config, error) {
+func loadConfig(r io.Reader) (*config, error) {
 	bytes, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
 
-	var blogs map[string]*BlogConfig
+	var blogs map[string]*blogConfig
 	err = yaml.Unmarshal(bytes, &blogs)
 	if err != nil {
 		return nil, err
 	}
 
-	config := &Config{
+	c := &config{
 		Default: blogs["default"],
 		Blogs:   blogs,
 	}
@@ -39,19 +40,38 @@ func LoadConfig(r io.Reader) (*Config, error) {
 	for key, b := range blogs {
 		b.RemoteRoot = key
 	}
-
-	return config, nil
+	return c, nil
 }
 
-func (c *Config) Get(remoteRoot string) *BlogConfig {
-	conf, ok := c.Blogs[remoteRoot]
+func (c *config) Get(remoteRoot string) *blogConfig {
+	bc, ok := c.Blogs[remoteRoot]
 	if !ok {
 		return nil
 	}
 
-	if conf.LocalRoot == "" {
-		conf.LocalRoot = c.Default.LocalRoot
+	if bc.LocalRoot == "" {
+		bc.LocalRoot = c.Default.LocalRoot
 	}
 
-	return conf
+	return bc
+}
+
+func mergeConfig(c1, c2 *config) *config {
+	if c1 == nil {
+		c1 = &config{
+			Blogs: make(map[string]*blogConfig),
+		}
+	}
+	if c2 == nil {
+		return c1
+	}
+	if c1.Default == nil {
+		c1.Default = c2.Default
+	}
+	for k, bc := range c2.Blogs {
+		if _, ok := c1.Blogs[k]; !ok {
+			c1.Blogs[k] = bc
+		}
+	}
+	return c1
 }

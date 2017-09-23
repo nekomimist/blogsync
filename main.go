@@ -1,13 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/codegangsta/cli"
 	"github.com/mitchellh/go-homedir"
+	"github.com/urfave/cli"
 )
+
+var errCommandHelp = fmt.Errorf("command help shown")
 
 func main() {
 	app := cli.NewApp()
@@ -16,72 +19,120 @@ func main() {
 		commandPush,
 		commandPost,
 	}
-
-	app.Run(os.Args)
+	app.Version = fmt.Sprintf("%s (%s)", version, revision)
+	err := app.Run(os.Args)
+	if err != nil {
+		if err != errCommandHelp {
+			logf("error", "%s", err)
+		}
+		os.Exit(1)
+	}
 }
 
-func loadConfigFile() *Config {
+func loadSingleConfigFile(fname string) (*config, error) {
+	if _, err := os.Stat(fname); err != nil {
+		return nil, nil
+	}
+	f, err := os.Open(fname)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return loadConfig(f)
+}
+
+func loadConfigFile() (*config, error) {
+	var conf *config
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	conf, err = loadSingleConfigFile(filepath.Join(pwd, "blogsync.yaml"))
+	if err != nil {
+		return nil, err
+	}
+
 	home, err := homedir.Dir()
-	dieIf(err)
-
-	f, err := os.Open(filepath.Join(home, ".config", "blogsync", "config.yaml"))
-	dieIf(err)
-
-	conf, err := LoadConfig(f)
-	dieIf(err)
-
-	return conf
+	if err != nil && conf == nil {
+		return nil, err
+	}
+	if err == nil {
+		homeConf, err := loadSingleConfigFile(filepath.Join(home, ".config", "blogsync", "config.yaml"))
+		if err != nil {
+			return nil, err
+		}
+		conf = mergeConfig(conf, homeConf)
+	}
+	if conf == nil {
+		return nil, fmt.Errorf("no config files found")
+	}
+	return conf, nil
 }
 
 var commandPull = cli.Command{
 	Name:  "pull",
 	Usage: "Pull entries from remote",
-	Action: func(c *cli.Context) {
+	Action: func(c *cli.Context) error {
 		blog := c.Args().First()
 		if blog == "" {
 			cli.ShowCommandHelp(c, "pull")
-			os.Exit(1)
+			return errCommandHelp
 		}
 
-		conf := loadConfigFile()
+		conf, err := loadConfigFile()
+		if err != nil {
+			return err
+		}
 		blogConfig := conf.Get(blog)
 		if blogConfig == nil {
-			logf("error", "blog not found: %s", blog)
-			os.Exit(1)
+			return fmt.Errorf("blog not found: %s", blog)
 		}
 
-		b := NewBroker(blogConfig)
+		b := newBroker(blogConfig)
 		remoteEntries, err := b.FetchRemoteEntries()
-		dieIf(err)
+		if err != nil {
+			return err
+		}
 
 		for _, re := range remoteEntries {
 			path := b.LocalPath(re)
 			_, err := b.StoreFresh(re, path)
-			dieIf(err)
+			if err != nil {
+				return err
+			}
 		}
+		return nil
 	},
 }
 
 var commandPush = cli.Command{
 	Name:  "push",
 	Usage: "Push local entries to remote",
-	Action: func(c *cli.Context) {
+	Action: func(c *cli.Context) error {
 		path := c.Args().First()
 		if path == "" {
 			cli.ShowCommandHelp(c, "push")
-			os.Exit(1)
+			return errCommandHelp
 		}
 
 		path, err := filepath.Abs(path)
-		dieIf(err)
+		if err != nil {
+			return err
+		}
 
-		var blogConfig *BlogConfig
+		var blogConfig *blogConfig
 
-		conf := loadConfigFile()
+		conf, err := loadConfigFile()
+		if err != nil {
+			return err
+		}
 		for remoteRoot := range conf.Blogs {
 			bc := conf.Get(remoteRoot)
 			localRoot, err := filepath.Abs(filepath.Join(bc.LocalRoot, remoteRoot))
-			dieIf(err)
+			if err != nil {
+				return err
+			}
 
 			if strings.HasPrefix(path, localRoot) {
 				blogConfig = bc
@@ -90,19 +141,24 @@ var commandPush = cli.Command{
 		}
 
 		if blogConfig == nil {
-			logf("error", "cannot find blog for %s", path)
-			os.Exit(1)
+			return fmt.Errorf("cannot find blog for %s", path)
 		}
 
-		b := NewBroker(blogConfig)
+		b := newBroker(blogConfig)
 
 		f, err := os.Open(path)
-		dieIf(err)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
 
 		entry, err := entryFromReader(f)
-		dieIf(err)
+		if err != nil {
+			return err
+		}
 
 		b.UploadFresh(entry)
+		return nil
 	},
 }
 
@@ -114,22 +170,26 @@ var commandPost = cli.Command{
 		cli.StringFlag{Name: "title"},
 		cli.StringFlag{Name: "custom-path"},
 	},
-	Action: func(c *cli.Context) {
+	Action: func(c *cli.Context) error {
 		blog := c.Args().First()
 		if blog == "" {
 			cli.ShowCommandHelp(c, "post")
-			os.Exit(1)
+			return errCommandHelp
 		}
 
-		conf := loadConfigFile()
+		conf, err := loadConfigFile()
+		if err != nil {
+			return err
+		}
 		blogConfig := conf.Get(blog)
 		if blogConfig == nil {
-			logf("error", "blog not found: %s", blog)
-			os.Exit(1)
+			return fmt.Errorf("blog not found: %s", blog)
 		}
 
 		entry, err := entryFromReader(os.Stdin)
-		dieIf(err)
+		if err != nil {
+			return err
+		}
 
 		if c.Bool("draft") {
 			entry.IsDraft = true
@@ -143,8 +203,11 @@ var commandPost = cli.Command{
 			entry.Title = title
 		}
 
-		b := NewBroker(blogConfig)
+		b := newBroker(blogConfig)
 		err = b.PostEntry(entry)
-		dieIf(err)
+		if err != nil {
+			return err
+		}
+		return nil
 	},
 }
